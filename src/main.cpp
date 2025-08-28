@@ -14,7 +14,7 @@
 
 #define I2C_MASTER_PORT I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ 400000    // 400kHz max for MTCH6301
-#define I2C_MASTER_TIMEOUT_MS 5000 
+#define I2C_MASTER_TIMEOUT_MS 8000 
 
 // Chip registers
 #define MTCH6301_REG_RX_CH 0x01
@@ -22,7 +22,7 @@
 
 
 volatile bool dataReady = false;
-uint8_t count = 0;
+uint32_t count = 0;
 
 void IRAM_ATTR intHandler();
 void performReset();
@@ -59,10 +59,10 @@ void setup() {
     while(1);
   }
 
-  if (!configureChip()) {
-    Serial.println("Failed to config chip");
-    while (1);    
-  }
+  // if (!configureChip()) {
+  //   Serial.println("Failed to config chip");
+  //   while (1);    
+  // }
 
   Serial.println("Init done");
 }
@@ -72,11 +72,9 @@ void loop() {
     dataReady = false;
     Serial.print("INT triggered - ");
     Serial.println(count);
+    // delay(5);
     readTouchData();
   }
-
-  delay(1);
-  
 }
 
 bool initI2C() {
@@ -120,6 +118,7 @@ bool configureChip() {
   };
 
   uint8_t read_rx, read_tx;
+  delay(24);
 
    if (i2c_read_register(MTCH6301_REG_RX_CH, &read_rx) != ESP_OK) {
     Serial.println("Failed to verify RX channels");
@@ -145,42 +144,27 @@ bool configureChip() {
 void readTouchData() {
   Serial.println("INT triggered - reading with ESP-IDF I2C...");
   
-  uint8_t buffer[32];  //
+  uint8_t buffer[64];  
   
-  // Try to read touch data
   esp_err_t ret = i2c_master_read_slave(buffer, sizeof(buffer));
   
   if (ret == ESP_OK) {
-    Serial.print("Successfully read data: ");
+    uint8_t len = buffer[0];  // First byte is length
+    Serial.print("Data length: ");
+    Serial.println(len);
     
-    // Find actual data length (stop at first 0xFF or after reasonable data)
-    int dataLength = sizeof(buffer);
-    for (int i = 0; i < sizeof(buffer); i++) {
-      if (buffer[i] == 0xFF && i > 4) { // Assume data doesn't start with 0xFF
-        dataLength = i;
-        break;
+    if (len > 0 && len < sizeof(buffer)) {
+      Serial.print("Data: ");
+      for (int i = 1; i <= len; i++) {  
+        Serial.print("0x");
+        if (buffer[i] < 0x10) Serial.print("0");
+        Serial.print(buffer[i], HEX);
+        Serial.print(" ");
       }
+      Serial.println();
     }
-    
-    // Print hex data
-    for (int i = 0; i < dataLength; i++) {
-      Serial.print("0x");
-      if (buffer[i] < 0x10) Serial.print("0");
-      Serial.print(buffer[i], HEX);
-      Serial.print(" ");
-    }
-    Serial.println();
-        
-  } else if (ret == ESP_ERR_TIMEOUT) {
-    Serial.println("Read timeout - device may be clock stretching extensively");
   } else {
-    Serial.printf("Read failed with error: %s\n", esp_err_to_name(ret));
-    
-    // Try to recover the bus
-    Serial.println("Attempting bus recovery...");
-    i2c_driver_delete(I2C_MASTER_PORT);
-    delay(100);
-    initI2C();
+    Serial.printf("Read failed: %s\n", esp_err_to_name(ret));
   }
 }
 
