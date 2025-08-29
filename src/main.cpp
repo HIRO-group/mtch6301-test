@@ -14,7 +14,7 @@
 
 #define I2C_MASTER_PORT I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ 400000    // 400kHz max for MTCH6301
-#define I2C_MASTER_TIMEOUT_MS 8000 
+#define I2C_MASTER_TIMEOUT_MS 10000 
 
 // Chip registers
 #define MTCH6301_REG_RX_CH 0x01
@@ -49,7 +49,7 @@ void setup() {
 
   pinMode(RESET_PIN, OUTPUT);
   pinMode(INT_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(INT_PIN), intHandler, HIGH);
+  attachInterrupt(digitalPinToInterrupt(INT_PIN), intHandler, RISING);
 
   delay(5000); // wait for console to be opened
   Serial.println("Starting");
@@ -144,7 +144,7 @@ bool configureChip() {
 void readTouchData() {
   Serial.println("INT triggered - reading with ESP-IDF I2C...");
   
-  uint8_t buffer[64];  
+  uint8_t buffer[7];  
   
   esp_err_t ret = i2c_master_read_slave(buffer, sizeof(buffer));
   
@@ -191,37 +191,50 @@ esp_err_t i2c_master_write_read_slave(uint8_t *data_wr, size_t write_size, uint8
                                      pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
 }
 
-esp_err_t i2c_write_register(uint8_t reg_addr, uint8_t value) {
-  uint8_t write_data[2];
-  write_data[0] = reg_addr;  // Register address
-  write_data[1] = value;     // Value to write
+esp_err_t i2c_write_register(uint8_t index, uint8_t offset, uint8_t value) {
+  uint8_t write_data[6];
+  // Not sure what these to are
+  write_data[0] = 0x55; //https://ww1.microchip.com/downloads/en/DeviceDoc/40001663B.pdf, Sync?
+  write_data[1] = 0x4; // Size
+  // Write register command
+  write_data[2] = 0x15;
+  // Data to write
+  write_data[3] = index;
+  write_data[4] = offset;
+  write_data[5] = value;
   
   esp_err_t ret = i2c_master_write_to_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR,
                                             write_data, 2,
                                             pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
   
   if (ret == ESP_OK) {
-    Serial.printf("Wrote 0x%02X to register 0x%02X\n", value, reg_addr);
+    Serial.printf("Wrote 0x%02X to register 0x%02X%X\n", value, index, offset);
   } else {
-    Serial.printf("Failed to write to register 0x%02X: %s\n", reg_addr, esp_err_to_name(ret));
+    Serial.printf("Failed to write to register: %s\n",esp_err_to_name(ret));
   }
   
   return ret;
 }
 
-esp_err_t i2c_read_register(uint8_t reg_addr, uint8_t *value) {
+esp_err_t i2c_read_register(uint8_t index, uint8_t offset, uint8_t *value) {
+  uint8_t data[5];
+  data[0] = 0x55;
+  data[1] = 0x3;
+  data[2] = 0x15;
+  data[3] = index;
+  data[4] = offset;
   // Write register address, then read the value
   esp_err_t ret = i2c_master_write_read_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR,
-                                              &reg_addr, 1,     // Write register address
-                                              value, 1,         // Read 1 byte
+                                              data, 5,   
+                                              data, 5,          
                                               pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
-  
   if (ret == ESP_OK) {
-    Serial.printf("Read 0x%02X from register 0x%02X\n", *value, reg_addr);
+    Serial.printf("Read 0x%02X from register 0x%02X\n", *value, offset);
+    *value = data[4];   
   } else {
-    Serial.printf("Failed to read from register 0x%02X: %s\n", reg_addr, esp_err_to_name(ret));
+    Serial.printf("Failed to read from register 0x%02X: %s\n", offset, esp_err_to_name(ret));
   }
-  
+
   return ret;
 }
 
