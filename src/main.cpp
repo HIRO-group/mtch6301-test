@@ -17,8 +17,9 @@
 #define I2C_MASTER_TIMEOUT_MS 10000 
 
 // Chip registers
-#define MTCH6301_REG_RX_CH 0x01
-#define MTCH6301_REG_TX_CH 0x02
+#define MTCH6301_REG_INDEX_GEN 0x00
+#define MTCH6301_REG_OFFSET_RX_CH 0x01
+#define MTCH6301_REG_OFFSET_TX_CH 0x02
 
 
 volatile bool dataReady = false;
@@ -28,13 +29,14 @@ void IRAM_ATTR intHandler();
 void performReset();
 void readTouchData();
 bool configureChip();
+bool pingMTCH();
 bool initI2C();
 
 // I2C Functions
 esp_err_t i2c_master_read_slave(uint8_t *data_rd, size_t size);
 esp_err_t i2c_master_write_read_slave(uint8_t *data_wr, size_t write_size, uint8_t *data_rd, size_t read_size);
-esp_err_t i2c_write_register(uint8_t reg_addr, uint8_t value);
-esp_err_t i2c_read_register(uint8_t reg_addr, uint8_t *value);
+esp_err_t i2c_write_register(uint8_t reg_index, uint8_t reg_offset, uint8_t value);
+esp_err_t i2c_read_register(uint8_t reg_index, uint8_t reg_offset, uint8_t *res);
 
 void IRAM_ATTR intHandler() {
   count++;
@@ -59,10 +61,15 @@ void setup() {
     while(1);
   }
 
-  // if (!configureChip()) {
-  //   Serial.println("Failed to config chip");
-  //   while (1);    
-  // }
+  if(!pingMTCH()) {
+    Serial.println("Failed to ping chip");
+    while (1);
+  }
+
+  if (!configureChip()) {
+    Serial.println("Failed to config chip");
+    while (1);    
+  }
 
   Serial.println("Init done");
 }
@@ -107,25 +114,25 @@ bool initI2C() {
 
 bool configureChip() {
   // write values
-  if (i2c_write_register(MTCH6301_REG_RX_CH, NUM_RX) != ESP_OK) {
+  if (i2c_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_CH, NUM_RX) != ESP_OK) {
     Serial.println("Failed to write RX");
     return false;
   };
 
-  if (i2c_write_register(MTCH6301_REG_TX_CH, NUM_TX) != ESP_OK) {
+  if (i2c_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_CH, NUM_TX) != ESP_OK) {
     Serial.println("Failed to write TX");
     return false;
   };
 
   uint8_t read_rx, read_tx;
-  delay(24);
+  delay(12);
 
-   if (i2c_read_register(MTCH6301_REG_RX_CH, &read_rx) != ESP_OK) {
+   if (i2c_read_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_CH, &read_rx) != ESP_OK) {
     Serial.println("Failed to verify RX channels");
     return false;
   }
   
-  if (i2c_read_register(MTCH6301_REG_TX_CH, &read_tx) != ESP_OK) {
+  if (i2c_read_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_CH, &read_tx) != ESP_OK) {
     Serial.println("Failed to verify TX channels");
     return false;
   }
@@ -139,6 +146,18 @@ bool configureChip() {
     return false;
   }
 
+}
+
+bool pingMTCH() {
+  uint8_t test;
+  esp_err_t ret = i2c_master_read_from_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR, &test, 1, pdMS_TO_TICKS(100));
+  if (ret == ESP_OK) {
+    Serial.println("Device responded");
+    return true;
+  } else {
+    Serial.printf("MTCH not responding: %s\n", esp_err_to_name(ret));
+    return false;
+  }
 }
 
 void readTouchData() {
@@ -193,6 +212,7 @@ esp_err_t i2c_master_write_read_slave(uint8_t *data_wr, size_t write_size, uint8
 
 esp_err_t i2c_write_register(uint8_t index, uint8_t offset, uint8_t value) {
   uint8_t write_data[6];
+  uint8_t resp[5];
   // Not sure what these to are
   write_data[0] = 0x55; //https://ww1.microchip.com/downloads/en/DeviceDoc/40001663B.pdf, Sync?
   write_data[1] = 0x4; // Size
@@ -204,37 +224,79 @@ esp_err_t i2c_write_register(uint8_t index, uint8_t offset, uint8_t value) {
   write_data[5] = value;
   
   esp_err_t ret = i2c_master_write_to_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR,
-                                            write_data, 2,
+                                            write_data, 6,
                                             pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
   
   if (ret == ESP_OK) {
-    Serial.printf("Wrote 0x%02X to register 0x%02X%X\n", value, index, offset);
+    Serial.printf("Wrote 0x%02X to register 0x%01X%X\n", value, index, offset);
   } else {
     Serial.printf("Failed to write to register: %s\n",esp_err_to_name(ret));
   }
-  
+
+  // Read back
+  vTaskDelay(pdMS_TO_TICKS(2));
+
+  ret = i2c_master_read_from_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR, resp, sizeof(resp), pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
   return ret;
 }
 
-esp_err_t i2c_read_register(uint8_t index, uint8_t offset, uint8_t *value) {
-  uint8_t data[5];
-  data[0] = 0x55;
-  data[1] = 0x3;
-  data[2] = 0x15;
-  data[3] = index;
-  data[4] = offset;
-  // Write register address, then read the value
-  esp_err_t ret = i2c_master_write_read_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR,
-                                              data, 5,   
-                                              data, 5,          
-                                              pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
-  if (ret == ESP_OK) {
-    Serial.printf("Read 0x%02X from register 0x%02X\n", *value, offset);
-    *value = data[4];   
-  } else {
-    Serial.printf("Failed to read from register 0x%02X: %s\n", offset, esp_err_to_name(ret));
-  }
+esp_err_t i2c_read_register(uint8_t index, uint8_t offset, uint8_t *res) {
+    uint8_t cmd[5];
+    uint8_t resp[6]; 
 
-  return ret;
+    cmd[0] = 0x55;
+    cmd[1] = 0x03;
+    cmd[2] = 0x16;
+    cmd[3] = index;
+    cmd[4] = offset;
+
+    // Send command
+    esp_err_t ret = i2c_master_write_to_device(
+        I2C_MASTER_PORT,
+        MTCH6301_I2C_ADDR,
+        cmd,
+        sizeof(cmd),
+        pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS)
+    );
+
+    if (ret != ESP_OK) {
+        Serial.printf("I2C write failed: %s\n", esp_err_to_name(ret));
+        return ret;
+    }
+
+    Serial.println("Write done");
+    vTaskDelay(pdMS_TO_TICKS(2));
+
+    // Read response (7 bytes)
+    ret = i2c_master_read_from_device(
+        I2C_MASTER_PORT,
+        MTCH6301_I2C_ADDR,
+        resp,
+        sizeof(resp),
+        pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS)
+    );
+
+    if (ret == ESP_OK) {
+        Serial.print("Raw response: ");
+        for (int i = 0; i < sizeof(resp); i++) {
+            Serial.printf("0x%02X ", resp[i]);
+        }
+        Serial.println();
+
+        if (resp[1] == 0x55 && resp[2] == 0x03 && resp[3] == 0x00) {
+            *res = resp[5];
+            Serial.printf("Read 0x%02X from register index=0x%02X offset=0x%02X\n",
+                          *res, index, offset);
+        } else {
+            Serial.printf("Invalid response format!\n");
+            ret = ESP_FAIL;
+        }
+    } else {
+        Serial.printf("I2C read failed: %s\n", esp_err_to_name(ret));
+    }
+
+    return ret;
 }
+
+
 
