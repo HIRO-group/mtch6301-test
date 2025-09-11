@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <driver/i2c.h> // Had to use this insted of Wire.h cause it didn't work with clock streaching
 
+#include "tl_expected/expected.hpp"
+
 // mtch6301 conf
 #define MTCH6301_I2C_ADDR 0x25
 #define RESET_PIN 7              
@@ -14,33 +16,38 @@
 
 #define I2C_MASTER_PORT I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ 400000    // 400kHz max for MTCH6301
-#define I2C_MASTER_TIMEOUT_MS 10000 
+#define I2C_MASTER_TIMEOUT_TI pdMS_TO_TICKS(10000) 
 
 // Chip registers
 #define MTCH6301_REG_INDEX_GEN 0x00
 #define MTCH6301_REG_OFFSET_RX_CH 0x01
 #define MTCH6301_REG_OFFSET_TX_CH 0x02
 
+struct TouchPacket {
+  uint8_t touchId;
+  bool penDown;
+  uint16_t x;
+  uint16_t y;
+};
 
 volatile bool dataReady = false;
+volatile bool ready = false;
 uint32_t count = 0;
 
 void IRAM_ATTR intHandler();
 void performReset();
-void readTouchData();
+tl::expected<TouchPacket, esp_err_t> readTouchPacket();
 bool configureChip();
 bool pingMTCH();
 bool initI2C();
 
 // I2C Functions
-esp_err_t i2c_master_read_slave(uint8_t *data_rd, size_t size);
-esp_err_t i2c_master_write_read_slave(uint8_t *data_wr, size_t write_size, uint8_t *data_rd, size_t read_size);
 esp_err_t i2c_write_register(uint8_t reg_index, uint8_t reg_offset, uint8_t value);
 esp_err_t i2c_read_register(uint8_t reg_index, uint8_t reg_offset, uint8_t *res);
 
 void IRAM_ATTR intHandler() {
   count++;
-  dataReady = true;
+  if (ready) dataReady = true;
 }
 
 void setup() {
@@ -72,15 +79,24 @@ void setup() {
   }
 
   Serial.println("Init done");
+  ready = true;
 }
 
 void loop() {
   if (dataReady) {
     dataReady = false;
-    Serial.print("INT triggered - ");
-    Serial.println(count);
-    // delay(5);
-    readTouchData();
+    auto res = readTouchPacket();
+    if (res) {
+      TouchPacket pkt = *res;
+      Serial.printf("Touch ID: %d\n", pkt.touchId);
+      Serial.printf("Pen Down: %d\n", pkt.penDown);
+      Serial.printf("X: %d\n", pkt.x);
+      Serial.printf("Y: %d\n", pkt.y);
+
+    } else {
+      Serial.print("Error reading touch data ");
+      Serial.println(esp_err_to_name(res.error()));
+    }
   }
 }
 
@@ -160,31 +176,40 @@ bool pingMTCH() {
   }
 }
 
-void readTouchData() {
-  Serial.println("INT triggered - reading with ESP-IDF I2C...");
+tl::expected<TouchPacket, esp_err_t> readTouchPacket() {
+  Serial.println("INT triggered");
+
+  uint8_t buffer[6];  
+  esp_err_t ret = i2c_master_read_from_device(
+      I2C_MASTER_PORT, MTCH6301_I2C_ADDR, buffer, sizeof(buffer),
+      I2C_MASTER_TIMEOUT_TI
+  );
+
+  if (ret != ESP_OK) return tl::unexpected(ret);
+
+  // buffer[0] is the length (always 0x05), ignore it
+  // The actual touch data starts at buffer[1] (D0-D4)
+  TouchPacket pkt;
   
-  uint8_t buffer[7];  
-  
-  esp_err_t ret = i2c_master_read_slave(buffer, sizeof(buffer));
-  
-  if (ret == ESP_OK) {
-    uint8_t len = buffer[0];  // First byte is length
-    Serial.print("Data length: ");
-    Serial.println(len);
-    
-    if (len > 0 && len < sizeof(buffer)) {
-      Serial.print("Data: ");
-      for (int i = 1; i <= len; i++) {  
-        Serial.print("0x");
-        if (buffer[i] < 0x10) Serial.print("0");
-        Serial.print(buffer[i], HEX);
-        Serial.print(" ");
-      }
-      Serial.println();
-    }
-  } else {
-    Serial.printf("Read failed: %s\n", esp_err_to_name(ret));
-  }
+  // D0 = buffer[1]: Extract TOUCHID<3:0> (bits 6-3) and PEN (bit 0)
+  pkt.touchId = (buffer[1] >> 3) & 0x0F;   // Extract bits 6-3
+  pkt.penDown = buffer[1] & 0x01;          // Extract bit 0
+
+  // D1 = buffer[2], D2 = buffer[3]: Extract X coordinate
+  // D1 contains X<6:0> in bits 6-0
+  // D2 contains X<11:7> in bits 4-0
+  uint16_t x_low = buffer[2] & 0x7F;        // X<6:0> from D1
+  uint16_t x_high = buffer[3] & 0x1F;       // X<11:7> from D2
+  pkt.x = (x_high << 7) | x_low;            // Combine: X<11:7> << 7 | X<6:0>
+
+  // D3 = buffer[4], D4 = buffer[5]: Extract Y coordinate
+  // D3 contains Y<6:0> in bits 6-0
+  // D4 contains Y<11:7> in bits 4-0
+  uint16_t y_low = buffer[4] & 0x7F;        // Y<6:0> from D3
+  uint16_t y_high = buffer[5] & 0x1F;       // Y<11:7> from D4
+  pkt.y = (y_high << 7) | y_low;            // Combine: Y<11:7> << 7 | Y<6:0>
+
+  return pkt;
 }
 
 void performReset() {  
@@ -195,19 +220,6 @@ void performReset() {
   digitalWrite(RESET_PIN, HIGH);
   Serial.println("reset (high)");
   delay(1000);
-}
-
-esp_err_t i2c_master_read_slave(uint8_t *data_rd, size_t size) {
-  return i2c_master_read_from_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR, 
-                                    data_rd, size, 
-                                    pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
-}
-
-esp_err_t i2c_master_write_read_slave(uint8_t *data_wr, size_t write_size, uint8_t *data_rd, size_t read_size) {
-  return i2c_master_write_read_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR,
-                                     data_wr, write_size,
-                                     data_rd, read_size,
-                                     pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
 }
 
 esp_err_t i2c_write_register(uint8_t index, uint8_t offset, uint8_t value) {
@@ -225,7 +237,7 @@ esp_err_t i2c_write_register(uint8_t index, uint8_t offset, uint8_t value) {
   
   esp_err_t ret = i2c_master_write_to_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR,
                                             write_data, 6,
-                                            pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
+                                            I2C_MASTER_TIMEOUT_TI);
   
   if (ret == ESP_OK) {
     Serial.printf("Wrote 0x%02X to register 0x%01X%X\n", value, index, offset);
@@ -236,7 +248,7 @@ esp_err_t i2c_write_register(uint8_t index, uint8_t offset, uint8_t value) {
   // Read back
   vTaskDelay(pdMS_TO_TICKS(2));
 
-  ret = i2c_master_read_from_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR, resp, sizeof(resp), pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
+  ret = i2c_master_read_from_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR, resp, sizeof(resp), I2C_MASTER_TIMEOUT_TI);
   return ret;
 }
 
@@ -256,7 +268,7 @@ esp_err_t i2c_read_register(uint8_t index, uint8_t offset, uint8_t *res) {
         MTCH6301_I2C_ADDR,
         cmd,
         sizeof(cmd),
-        pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS)
+        I2C_MASTER_TIMEOUT_TI
     );
 
     if (ret != ESP_OK) {
@@ -264,7 +276,6 @@ esp_err_t i2c_read_register(uint8_t index, uint8_t offset, uint8_t *res) {
         return ret;
     }
 
-    Serial.println("Write done");
     vTaskDelay(pdMS_TO_TICKS(2));
 
     // Read response (7 bytes)
@@ -273,14 +284,10 @@ esp_err_t i2c_read_register(uint8_t index, uint8_t offset, uint8_t *res) {
         MTCH6301_I2C_ADDR,
         resp,
         sizeof(resp),
-        pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS)
+        I2C_MASTER_TIMEOUT_TI
     );
 
     if (ret == ESP_OK) {
-        Serial.print("Raw response: ");
-        for (int i = 0; i < sizeof(resp); i++) {
-            Serial.printf("0x%02X ", resp[i]);
-        }
         Serial.println();
 
         if (resp[1] == 0x55 && resp[2] == 0x03 && resp[3] == 0x00) {
