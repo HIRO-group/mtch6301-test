@@ -1,6 +1,7 @@
 venv
 .direnv
 .vscode
+.venv
 
 .pio
 

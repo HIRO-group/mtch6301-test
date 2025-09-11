@@ -50,7 +50,7 @@
       {
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [ 
-	    platformio
+	          platformio
             picocom 
           ];
         };

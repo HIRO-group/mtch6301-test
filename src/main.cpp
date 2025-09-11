@@ -88,11 +88,12 @@ void loop() {
     auto res = readTouchPacket();
     if (res) {
       TouchPacket pkt = *res;
-      Serial.printf("Touch ID: %d\n", pkt.touchId);
-      Serial.printf("Pen Down: %d\n", pkt.penDown);
-      Serial.printf("X: %d\n", pkt.x);
-      Serial.printf("Y: %d\n", pkt.y);
-
+      Serial.write(pkt.touchId);
+      Serial.write(pkt.penDown ? 1 : 0);
+      Serial.write(pkt.x & 0xFF);
+      Serial.write((pkt.x >> 8) & 0xFF);
+      Serial.write(pkt.y & 0xFF);
+      Serial.write((pkt.y >> 8) & 0xFF);
     } else {
       Serial.print("Error reading touch data ");
       Serial.println(esp_err_to_name(res.error()));
@@ -177,8 +178,6 @@ bool pingMTCH() {
 }
 
 tl::expected<TouchPacket, esp_err_t> readTouchPacket() {
-  Serial.println("INT triggered");
-
   uint8_t buffer[6];  
   esp_err_t ret = i2c_master_read_from_device(
       I2C_MASTER_PORT, MTCH6301_I2C_ADDR, buffer, sizeof(buffer),
