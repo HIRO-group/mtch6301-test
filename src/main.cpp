@@ -1,47 +1,11 @@
 #include <Arduino.h>
+#include <array>
 #include <driver/i2c.h> // Had to use this insted of Wire.h cause it didn't work with clock streaching
-
-// mtch6301 conf
-#define MTCH6301_I2C_ADDR 0x25
-#define RESET_PIN 7              
-#define INT_PIN 8                
-
-#define SDA_PIN 5               
-#define SCL_PIN 6
-
-#define NUM_TX 7 // 3-13
-#define NUM_RX 3 // 3-18
-
-#define I2C_MASTER_PORT I2C_NUM_0
-#define I2C_MASTER_FREQ_HZ 400000    // 400kHz max for MTCH6301
-#define I2C_MASTER_TIMEOUT_TI pdMS_TO_TICKS(10000) 
-
-// Chip registers
-#define MTCH6301_REG_INDEX_GEN 0x00
-#define MTCH6301_REG_OFFSET_RX_CH 0x01
-#define MTCH6301_REG_OFFSET_TX_CH 0x02
-
-struct TouchPacket {
-  uint8_t touchId;
-  bool penDown;
-  uint16_t x;
-  uint16_t y;
-};
+#include <mtch6301.hpp>
 
 volatile bool dataReady = false;
 volatile bool ready = false;
 uint32_t count = 0;
-
-void IRAM_ATTR intHandler();
-void performReset();
-esp_err_t readTouchPacket();
-bool configureChip();
-bool pingMTCH();
-bool initI2C();
-
-// I2C Functions
-esp_err_t i2c_write_register(uint8_t reg_index, uint8_t reg_offset, uint8_t value);
-esp_err_t i2c_read_register(uint8_t reg_index, uint8_t reg_offset, uint8_t *res);
 
 void IRAM_ATTR intHandler() {
   count++;
@@ -58,7 +22,7 @@ void setup() {
   pinMode(INT_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(INT_PIN), intHandler, RISING);
 
-  delay(5000); // wait for console to be opened
+  delay(5000);
   Serial.println("Starting");
   performReset();
   if (!initI2C()) {
@@ -129,38 +93,92 @@ bool initI2C() {
 
 bool configureChip() {
   // write values
-  if (i2c_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_CH, NUM_RX) != ESP_OK) {
+  if (mtch_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_CH, NUM_RX) != ESP_OK) {
     Serial.println("Failed to write RX");
     return false;
   };
 
-  if (i2c_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_CH, NUM_TX) != ESP_OK) {
+  if (mtch_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_CH, NUM_TX) != ESP_OK) {
     Serial.println("Failed to write TX");
     return false;
   };
 
-  uint8_t read_rx, read_tx;
+  uint16_t rx_scale = scaling_coefficients[NUM_RX - 3];
+  uint8_t rx_coe[2] = { uint8_t(rx_scale & 0xFF), uint8_t((rx_scale >> 8) & 0xFF) };
+  if (mtch_write_multi(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_COE_S, rx_coe, sizeof(rx_coe)) != ESP_OK) {
+    Serial.println("Failed to write RX scaling coefficient");
+    return false;
+  }
+  // if (mtch_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_COE_S, rx_coe[0]) != ESP_OK) {
+  //   Serial.println("Failed to write RX scaling coefficient (low byte)");
+  //   return false;
+  // };
+
+  // if (mtch_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_COE_S + 1, rx_coe[1]) != ESP_OK) {
+  //   Serial.println("Failed to write RX scaling coefficent (high byte)");
+  //   return false;
+  // };
+
+  uint16_t tx_scale = scaling_coefficients[NUM_TX - 3];
+  uint8_t tx_coe[2] = { uint8_t(tx_scale & 0xFF), uint8_t((tx_scale >> 8) & 0xFF) };
+  if (mtch_write_multi(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_COE_S, tx_coe, sizeof(tx_coe)) != ESP_OK) {
+    Serial.println("Failed to write TX scaling coefficient");
+    return false;
+  }
+  
+  // if (mtch_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_COE_S, tx_coe[0]) != ESP_OK) {
+  //   Serial.println("Failed to write TX scaling coefficient (low byte)");
+  //   return false;
+  // };
+
+  // if (mtch_write_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_COE_S + 1, tx_coe[1]) != ESP_OK) {
+  //   Serial.println("Failed to write TX scaling coefficent (high byte)");
+  //   return false;
+  // };
+
+  // Read back values
   delay(12);
 
-   if (i2c_read_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_CH, &read_rx) != ESP_OK) {
+  uint8_t read_rx, read_tx;
+  if (mtch_read_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_CH, &read_rx) != ESP_OK) {
     Serial.println("Failed to verify RX channels");
     return false;
   }
   
-  if (i2c_read_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_CH, &read_tx) != ESP_OK) {
+  if (mtch_read_register(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_CH, &read_tx) != ESP_OK) {
     Serial.println("Failed to verify TX channels");
     return false;
   }
 
-  if (read_rx == NUM_RX && read_tx == NUM_TX) {
-    Serial.printf("Configuration verified: RX=%d, TX=%d\n", read_rx, read_tx);
-    return true;
-  } else {
-    Serial.printf("Configuration mismatch: Expected RX=%d TX=%d, Got RX=%d TX=%d\n", 
-                  NUM_RX, NUM_TX, read_rx, read_tx);
+  uint8_t rx_read_buf[2];
+  uint8_t tx_read_buf[2];
+  uint16_t rx_read_val, tx_read_val;
+
+  if (mtch_read_multi(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_RX_COE_S, rx_read_buf, 2) != ESP_OK) {
+    Serial.println("Failed to read RX scaling coefficient");
     return false;
   }
+  rx_read_val = rx_read_buf[0] | (rx_read_buf[1] << 8);
 
+  if (mtch_read_multi(MTCH6301_REG_INDEX_GEN, MTCH6301_REG_OFFSET_TX_COE_S, tx_read_buf, 2) != ESP_OK) {
+    Serial.println("Failed to read TX scaling coefficient");
+    return false;
+  }
+  tx_read_val = tx_read_buf[0] | (tx_read_buf[1] << 8);
+
+  if (read_rx == NUM_RX && read_tx == NUM_TX &&
+      rx_read_val == rx_scale && tx_read_val == tx_scale) {
+    Serial.printf("Configuration verified: RX=%d, TX=%d, SCALING_RX=%d, SCALING_TX=%d\n",
+                  read_rx, read_tx, rx_read_val, tx_read_val);
+    return true;
+  } else {
+    Serial.printf("Configuration mismatch!\n");
+    Serial.printf("Expected RX=%d, TX=%d, SCALING_RX=%d, SCALING_TX=%d\n",
+                  NUM_RX, NUM_TX, rx_scale, tx_scale);
+    Serial.printf("Got RX=%d, TX=%d, SCALING_RX=%d, SCALING_TX=%d\n",
+                  read_rx, read_tx, rx_read_val, tx_read_val);
+    return false;
+  }
 }
 
 bool pingMTCH() {
@@ -211,14 +229,34 @@ esp_err_t readTouchPacket(TouchPacket* pkt) {
 void performReset() {  
   digitalWrite(RESET_PIN, LOW);
   Serial.println("reset (low)");
-  delay(500);  
-  
+  delay(100);  
   digitalWrite(RESET_PIN, HIGH);
   Serial.println("reset (high)");
-  delay(1000);
+  delay(100);
 }
 
-esp_err_t i2c_write_register(uint8_t index, uint8_t offset, uint8_t value) {
+esp_err_t mtch_write_multi(uint8_t index, uint8_t offset_start, const uint8_t* data, size_t len) {
+  for (int i = 0; i < len; i++) {
+    esp_err_t ret = mtch_write_register(index, offset_start + i, data[i]);
+    if (ret != ESP_OK) return ret;
+    vTaskDelay(pdMS_TO_TICKS(3));
+
+  }
+
+  return ESP_OK;
+}
+
+esp_err_t mtch_read_multi(uint8_t index, uint8_t offset_start, uint8_t* res, size_t len) {
+  for (int i = 0; i < len; i++) {
+    esp_err_t ret = mtch_read_register(index, offset_start + i, &res[i]);
+    if (ret != ESP_OK) return ret;
+    vTaskDelay(pdMS_TO_TICKS(3));
+  }
+
+  return ESP_OK;
+}
+
+esp_err_t mtch_write_register(uint8_t index, uint8_t offset, uint8_t value) {
   // https://ww1.microchip.com/downloads/en/DeviceDoc/40001663B.pdf
   uint8_t write_data[6] = {0x55, 0x4, 0x15, index, offset, value};
   uint8_t resp[5];
@@ -236,10 +274,11 @@ esp_err_t i2c_write_register(uint8_t index, uint8_t offset, uint8_t value) {
   vTaskDelay(pdMS_TO_TICKS(2));
 
   ret = i2c_master_read_from_device(I2C_MASTER_PORT, MTCH6301_I2C_ADDR, resp, sizeof(resp), I2C_MASTER_TIMEOUT_TI);
+  // Serial.printf("Write status: 0x%02X\n", resp[3]);
   return ret;
 }
 
-esp_err_t i2c_read_register(uint8_t index, uint8_t offset, uint8_t *res) {
+esp_err_t mtch_read_register(uint8_t index, uint8_t offset, uint8_t *res) {
   // https://ww1.microchip.com/downloads/en/DeviceDoc/40001663B.pdf
   uint8_t cmd[5] = {0x55, 0x03, 0x16, index, offset};
   uint8_t resp[6]; 
