@@ -5,3 +5,6 @@ venv
 
 .pio
 
+**/*.stl
+**/*.FCBak
+

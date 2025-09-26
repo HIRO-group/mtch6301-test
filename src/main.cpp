@@ -5,10 +5,8 @@
 
 volatile bool dataReady = false;
 volatile bool ready = false;
-uint32_t count = 0;
 
 void IRAM_ATTR intHandler() {
-  count++;
   if (ready) dataReady = true;
 }
 
